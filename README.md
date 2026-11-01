@@ -81,7 +81,22 @@ These results use 25 test cars (generator v2.1).
 
 All 50 first drafts ran in the kernel. Removing the example program costs 0.02 silhouette IoU but 0.08 voxel IoU (`results_v21_noex/`). An earlier parameter-revising loop reached 0.952 silhouette IoU (`results/`, `results_v2/`).
 
-**Key finding:** feedback from the silhouette alone lets the planner match the outline, but not the 3D shape. Voxel IoU barely improves across rounds. This is the motivation for feedback through 3D state, from the kernel and, ultimately, from the learned world model.
+Feedback from the silhouette alone lets the planner match the outline far better than the 3D shape. With no example, the outline beats the average car, but the voxel IoU stays below it.
+
+### 3. Does 3D feedback help the program writer?
+
+This uses the same 25 cars, no example program, and Muse Spark 1.3 (contributor tier) in all three arms (`results_v21_3d/`). After each round the model sees the outline overlay, plus:
+
+| feedback after each round | silhouette IoU | voxel IoU, first draft → final | Chamfer (mm) |
+|---|---|---|---|
+| outline only (control) | 0.912 | 0.545 → 0.723 | 66 |
+| + **its own car's 3D state** (kernel measurements, front/side/top renders) | 0.888 | 0.523 → 0.701 | 75 |
+| + **the true car's 3D state** (upper bound, not a method) | 0.928 | 0.533 → **0.789** | **49** |
+
+- **Its own 3D state does not help.** The change is −0.023 ± 0.021 voxel IoU, paired over 25 cars. It describes the model's own car and carries no new information about the target.
+- **The true 3D state helps at once.** The gain is +0.065 ± 0.018 voxel IoU, and the result is better on 20 of 25 cars. Chamfer falls 26 %, and most of the gain comes in the first revision. So the model *can* turn part sizes into correct program edits.
+
+**Key finding:** the bottleneck is perceiving the target's 3D state from the photo, not editing the program. A world model predicts the consequences of the planner's own actions; it cannot add information about the target. The next component is a **state estimator**: photo → the target's per-part sizes and positions. It can be trained on generated cars, where the true state is free, and it plugs into the slot the upper bound used.
 
 Full tables are in `results*/summary.md`. Per-car rows are in `results*/<predictor>.jsonl`.
 
@@ -155,6 +170,8 @@ python scripts/run_baseline.py --data data_v21/test --predictor vlm_program --li
 | `vlm`, `vlm_cam` | a vision-language model estimates parameters from the photo (`vlm_cam` is also given the camera) |
 | `vlm_loop`, `vlm_loop2`, `vlm_loop3` | render-and-revise loops over parameters |
 | `vlm_program` | the model **writes the CAD program**. The kernel runs it, and the model sees kernel errors or its render plus an overlay, then rewrites. `--no-program-example` removes the example program from the prompt |
+| `vlm_program_3d` | as `vlm_program`, plus 3D feedback about its own car: the kernel's state summary and front/side/top renders |
+| `vlm_program_truth3d` | as `vlm_program_3d`, plus the true car's state summary (upper bound for 3D feedback) |
 
 ### Fine-tuning data
 
@@ -180,11 +197,12 @@ This builds each `program_cq.py` with OpenCascade, checks that the volumes match
   - The glass insets pointed into the body.
   - Low cars could have their tyres poke through the bonnet.
 
-  Used for `results_v21/`, `results_v21_noex/` and `results_wm21/`. Every `params.json` records its `generator_version`.
+  Used for `results_v21/`, `results_v21_noex/`, `results_v21_3d/` and `results_wm21/`. Every `params.json` records its `generator_version`.
 
 ## Roadmap
 
-1. Close the loop with 3D state feedback: the planner sees kernel state summaries, not only renders.
-2. Fine-tune the world model on generator trajectories and use it in place of the kernel inside the planner's loop.
-3. Train the planner with reinforcement learning, with the world model as a cheap simulator.
-4. Move from renders to real photos, using segmentation to isolate the car.
+1. ~~Close the loop with 3D state feedback.~~ Done (section 3 of the results): it only helps when the feedback carries information about the target.
+2. Train a state estimator: photo → the target's state summary, from generated cars.
+3. Fine-tune the world model on generator trajectories and use it in place of the kernel inside the planner's loop.
+4. Train the planner with reinforcement learning, with the world model as a cheap simulator.
+5. Move from renders to real photos, using segmentation to isolate the car.

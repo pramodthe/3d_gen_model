@@ -187,8 +187,20 @@ class Model:
 GRID_BOUNDS = np.array([[-2800.0, 2800.0], [-1150.0, 1150.0], [-40.0, 2000.0]])
 
 
-def make_grid(res: float = 30.0):
-    axes = [np.arange(lo + res / 2, hi, res) for lo, hi in GRID_BOUNDS]
+def make_grid(res: float = 30.0, centered: bool = False):
+    """Voxel-centre grid over GRID_BOUNDS. centered=True places the cells symmetrically about x = 0 and y = 0, so a
+    mirrored part measures as exactly left-right symmetric (the default grid is kept for existing data and metrics:
+    at res 30 or 40 its y centres are offset from 0, which biases the symmetry flag)."""
+    if centered:
+        axes = []
+        for k, (lo, hi) in enumerate(GRID_BOUNDS):
+            if k < 2:
+                n = int((hi - lo) // res)
+                axes.append((np.arange(n) - (n - 1) / 2) * res)
+            else:
+                axes.append(np.arange(lo + res / 2, hi, res))
+    else:
+        axes = [np.arange(lo + res / 2, hi, res) for lo, hi in GRID_BOUNDS]
     X, Y, Z = np.meshgrid(*axes, indexing="ij")
     return np.stack([X.ravel(), Y.ravel(), Z.ravel()], 1), [len(a) for a in axes], res
 

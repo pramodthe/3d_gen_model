@@ -13,6 +13,9 @@ Predictors
              Fireworks: --base-url https://api.fireworks.ai/inference/v1 --api-key-env FIREWORKS_API_KEY
                         --model accounts/fireworks/models/<a vision model>
              The API key, if one is needed, is read from the environment variable named by --api-key-env.
+    vlm_program          the model writes the CAD program; feedback = kernel errors or render + outline overlay
+    vlm_program_3d       + 3D feedback about its OWN program: kernel state summary and front/side/top renders
+    vlm_program_truth3d  + the TRUE car's state summary (upper bound for 3D feedback, not a method)
 
 Usage:
     python scripts/run_baseline.py --data data/test --predictor mean search --limit 20
@@ -433,9 +436,75 @@ def parse_program(text: str) -> list[dict]:
     return ops
 
 
-def predict_vlm_program(sample, rng, args):
+# ------------------------------------------------------------------ 3D state feedback for the program writer
+STATE_RES = 40.0          # mm grid for state summaries (same as the world-model benchmark)
+SELF_VIEWS = [("front", 0.0, 4.0, 6500.0), ("left side", 90.0, 4.0, 9500.0), ("top", 90.0, 89.0, 9500.0)]  # name, az, el, distance
+
+
+def program_state(ops: list[dict]) -> dict:
+    """The kernel's state summary after the whole program: per part volume, bounding box, materials, symmetry.
+    This is exactly what the world model predicts step by step, so a trained world model can stand in for it."""
+    P, _, res = sk.make_grid(STATE_RES, centered=True)
+    ops = [sk.public_op(o) for o in ops]          # drop the kernel's cached arrays (e.g. on the true program)
+    *_, (i, part_d, part_m) = sk.Model(json.loads(json.dumps(ops))).iter_eval(P)
+    return sk._summary(ops[i], part_d, part_m, P, res)
+
+
+def _overall(state: dict):
+    boxes = [(p["min_mm"], p["bbox_mm"]) for p in state["parts"].values() if p.get("bbox_mm")]
+    if not boxes:
+        return None
+    lo = np.min([b[0] for b in boxes], 0)
+    hi = np.max([np.add(b[0], b[1]) for b in boxes], 0)
+    return lo, hi
+
+
+def state_text(state: dict, title: str) -> str:
+    """Readable table of a state summary: L along X (front-back), W along Y (across), H along Z (up), in mm."""
+    lines = [title]
+    ov = _overall(state)
+    if ov:
+        lo, hi = ov
+        lines.append(f"  whole car: length {hi[0] - lo[0]:.0f}, width {hi[1] - lo[1]:.0f}, height {hi[2] - lo[2]:.0f} "
+                     f"(x {lo[0]:.0f}..{hi[0]:.0f}, y {lo[1]:.0f}..{hi[1]:.0f}, z {lo[2]:.0f}..{hi[2]:.0f})")
+    for name, p in state["parts"].items():
+        if not p.get("bbox_mm"):
+            lines.append(f"  {name}: empty")
+            continue
+        (x0, y0, z0), (L, W, H) = p["min_mm"], p["bbox_mm"]
+        mats = ", ".join(f"{m} {v:.0%}" for m, v in sorted(p.get("surface_materials", {}).items(), key=lambda kv: -kv[1]))
+        lines.append(f"  {name}: length {L}, width {W}, height {H} (x {x0}..{x0 + L}, y {y0}..{y0 + W}, "
+                     f"z {z0}..{z0 + H}); volume {p['volume_l']:.0f} L; surface {mats}; "
+                     f"{'left-right symmetric' if p.get('left_right_symmetric') else 'NOT left-right symmetric'}")
+    return "\n".join(lines)
+
+
+def self_views(ops: list[dict], look) -> np.ndarray:
+    """The model's own car seen from the front, the left side and above (no information about the true car)."""
+    model, tiles = sk.Model(json.loads(json.dumps(ops))), []
+    for _, az, el, dist in SELF_VIEWS:
+        cam = Camera(azimuth=az, elevation=el, distance=dist, fov=32.0, target_z=650.0, width=256, height=192)
+        tiles += [render(model, cam, look)["rgb"], np.full((192, 6, 3), 255, np.uint8)]
+    return np.concatenate(tiles[:-1], 1)
+
+
+def predict_vlm_program_3d(sample, rng, args):
+    """vlm_program plus 3D state feedback about the model's OWN program: the kernel's state summary (per-part sizes,
+    positions, volumes, materials) and renders of its car from the front, side and top. Nothing about the true car
+    is shown, so this is a fair method; the kernel's summary is what a learned world model would supply."""
+    return predict_vlm_program(sample, rng, args, state_feedback="own", tag="program_3d")
+
+
+def predict_vlm_program_truth3d(sample, rng, args):
+    """UPPER BOUND, not a method: as vlm_program_3d, plus the TRUE car's state summary. It measures whether a model
+    can act on 3D numbers at all, i.e. the ceiling for any 3D feedback."""
+    return predict_vlm_program(sample, rng, args, state_feedback="truth", tag="program_truth3d")
+
+
+def predict_vlm_program(sample, rng, args, state_feedback: str = "none", tag: str = "program"):
     """The model WRITES the build program (components, shapes, positions). The kernel executes it; the model sees
-    kernel errors or its rendered result next to the photo with a difference overlay, and rewrites the program."""
+    kernel errors or its rendered result next to the photo with a difference overlay, and rewrites the program.
+    state_feedback: "none" (silhouette only), "own" (+ its own 3D state and views), "truth" (+ the true state)."""
     cam, target = sample["camera"], sample["mask"]
     photo = {"type": "image_url", "image_url": {"url": _png_url(sample["image_path"])}}
     example = ("\nExample of a complete, valid program for a DIFFERENT car (a generic sedan), to show the format and "
@@ -452,11 +521,20 @@ def predict_vlm_program(sample, rng, args):
             iou, err = metrics.mask_iou(r["mask"], target), None
         except Exception as e:  # the kernel rejected the program: that message is the feedback
             r, iou, err = None, 0.0, f"{type(e).__name__}: {e}"
-        history.append({"round": rnd, "iou": round(iou, 4), "n_ops": len(ops), "error": err})
+        state = None
+        if err is None and state_feedback != "none":
+            try:
+                state = program_state(ops)
+            except Exception as e:
+                state = None
+        hist = {"round": rnd, "iou": round(iou, 4), "n_ops": len(ops), "error": err}
+        if args.track_3d and err is None:   # diagnostics only, never shown to the model
+            hist["voxel_iou"] = round(float(evaluate_ops(json.loads(json.dumps(ops)), sample)[1]["voxel_iou"]), 4)
+        history.append(hist)
         if err is None and (best is None or iou > best[0]):
             best = (iou, ops)
         if args.out and r is not None:
-            d = Path(args.out) / "program"
+            d = Path(args.out) / tag
             d.mkdir(parents=True, exist_ok=True)
             Image.fromarray(feedback_panel(sample["image"], r["rgb"], target, r["mask"])).save(
                 d / f"{sample['id']}_round{rnd}.png")
@@ -476,6 +554,26 @@ def predict_vlm_program(sample, rng, args):
                   "revised program.")
             imgs = [photo, {"type": "image_url", "image_url": {"url": _png_url(
                 feedback_panel(sample["image"], r["rgb"], target, r["mask"]))}}]
+            if state_feedback != "none" and state is not None:
+                views = self_views(ops, sample["look"])
+                imgs.append({"type": "image_url", "image_url": {"url": _png_url(views)}})
+                if args.out:
+                    Image.fromarray(views).save(Path(args.out) / tag / f"{sample['id']}_round{rnd}_views.png")
+                fb += ("\n\n3D CHECK. The outline overlay only shows one direction; width, cross-section and the far "
+                       "side are invisible in it. The third image shows YOUR car from the front, the left side and "
+                       "the top (left to right; in the side and top views the car's front is on the left). The CAD kernel "
+                       "measured your car as follows (part 'body' includes everything you built into it, mirrors "
+                       "too).\n"
+                       + state_text(state, "Your car (measured by the CAD kernel, mm, litres):"))
+                if state_feedback == "truth":
+                    fb += ("\n" + state_text(sample.setdefault("gt_state", program_state(sample["ops"])),
+                                              "The TRUE car in the photo (same format):")
+                           + "\nMake each part's sizes and positions match the true car.")
+                else:
+                    fb += ("\nCompare every number with what the photo shows and what a real car of this kind is "
+                           "like (overall width, wheel track and tyre width, roof and glass height, the cross-section "
+                           "seen from the front, part positions). Fix the numbers and shapes that are wrong, "
+                           "including those the outline overlay cannot show.")
         text = (base + f"\nOutline overlap so far (1.0 = perfect): {tries}.\n"
                 f"Your last program:\n{json.dumps([{k: v for k, v in o.items() if k != 'step'} for o in ops], separators=(',', ':'))}\n\n"
                 + fb + "\nOutput ONLY the JSON list of operations.")
@@ -591,7 +689,8 @@ def load_dotenv(path: Path) -> None:
 PREDICTORS = {"oracle": predict_oracle, "mean": predict_mean, "random": predict_random,
               "search": predict_search, "vlm": predict_vlm, "vlm_cam": predict_vlm_cam, "vlm_loop": predict_vlm_loop,
               "vlm_loop2": predict_vlm_loop2, "vlm_loop3": predict_vlm_loop3,
-              "vlm_program": predict_vlm_program}
+              "vlm_program": predict_vlm_program, "vlm_program_3d": predict_vlm_program_3d,
+              "vlm_program_truth3d": predict_vlm_program_truth3d}
 
 
 # ------------------------------------------------------------------ evaluation loop
@@ -662,6 +761,8 @@ def main():
     ap.add_argument("--loop-stop-iou", type=float, default=0.985, help="vlm_loop: stop early above this IoU")
     ap.add_argument("--no-program-example", dest="program_example", action="store_false",
                     help="vlm_program: do not show an example program (pure zero-shot program writing)")
+    ap.add_argument("--track-3d", action="store_true",
+                    help="vlm_program*: also record each round's voxel IoU (diagnostic only; never shown to the model)")
     ap.add_argument("--retries", type=int, default=1, help="extra attempts after an empty or unparsable reply")
     ap.add_argument("--resume", action="store_true", help="keep finished cars in results/, redo missing and failed ones")
     ap.add_argument("--api-key-env", default="META_API_KEY" if os.environ.get("META_API_KEY") else "OPENAI_API_KEY",
@@ -670,7 +771,7 @@ def main():
     if any(p.startswith("vlm") for p in a.predictor) and not os.environ.get(a.api_key_env) and "localhost" not in a.base_url:
         sys.exit(f"No API key: put {a.api_key_env}=... in the .env file (or export it in your shell).")
     if a.loop_rounds is None:
-        a.loop_rounds = (5 if "vlm_loop2" in a.predictor else 4 if ("vlm_loop3" in a.predictor or "vlm_program" in a.predictor)
+        a.loop_rounds = (5 if "vlm_loop2" in a.predictor else 4 if ("vlm_loop3" in a.predictor or any(p.startswith("vlm_program") for p in a.predictor))
                          else 3)
     if a.summarize_only:
         print(summarize(Path(a.out)))
@@ -735,7 +836,7 @@ def summarize(out: Path) -> str:
             "style_acc": (float(np.mean([r["style_correct"] for r in ok if r.get("style_correct") is not None]))
                           if any(r.get("style_correct") is not None for r in ok) else float("nan")),
             "param_err": mean("param_err"), "sec_per_car": float(np.mean([r.get("seconds", np.nan) for r in rows]))}
-    order = ["oracle", "search", "vlm_program", "vlm_loop3", "vlm_loop2", "vlm_loop", "vlm_cam", "vlm", "mean", "random"]
+    order = ["oracle", "search", "vlm_program_truth3d", "vlm_program_3d", "vlm_program", "vlm_loop3", "vlm_loop2", "vlm_loop", "vlm_cam", "vlm", "mean", "random"]
     names = sorted(summary, key=lambda k: order.index(k) if k in order else 99)
     lines = ["| predictor | n | runs | silhouette IoU | voxel IoU | Chamfer (mm) | Chamfer (% length) | depth MAE (mm) "
              "| style acc | param err | s/car |", "|" + "---|" * 11]
