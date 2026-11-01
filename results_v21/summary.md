@@ -1,0 +1,6 @@
+| predictor | n | runs | silhouette IoU | voxel IoU | Chamfer (mm) | Chamfer (% length) | depth MAE (mm) | style acc | param err | s/car |
+|---|---|---|---|---|---|---|---|---|---|---|
+| oracle | 25 | 100% | 1.000 | 0.999 | 0 | 0.00 | 0 | 100% | 0.000 | 4.4 |
+| search | 25 | 100% | 0.968 | 0.908 | 22 | 0.50 | 49 | 88% | 0.246 | 38.7 |
+| vlm_program | 25 | 100% | 0.922 | 0.786 | 56 | 1.26 | 146 | nan% | nan | 54.9 |
+| mean | 25 | 100% | 0.871 | 0.794 | 59 | 1.32 | 137 | 20% | 0.364 | 4.6 |

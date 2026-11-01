@@ -1,0 +1,24 @@
+# secrets
+.env
+.env.*
+
+# environments and caches
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+_to_delete/
+
+# generated data (regenerate with scripts/generate_dataset.py)
+data/
+data_v2/
+data_v21/
+*.step
+*.stl
+
+# bulky per-car images from runs (a few examples are kept in figures/)
+results*/compare/
+results*/loop/
+results*/loop2/
+results*/loop3/
+results*/program/

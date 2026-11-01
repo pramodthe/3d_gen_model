@@ -1,0 +1,6 @@
+# Steps 1-2 (data generation, rendering, baselines): numpy + pillow only
+numpy>=1.24
+pillow>=9.0
+
+# Optional: real OpenCascade kernel, STEP/STL export (scripts/verify_cadquery.py)
+# cadquery>=2.4

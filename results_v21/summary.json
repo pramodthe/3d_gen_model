@@ -1,0 +1,50 @@
+{
+  "mean": {
+    "n": 25,
+    "exec_rate": 1.0,
+    "silhouette_iou": 0.8709879572324766,
+    "voxel_iou": 0.7938908244729816,
+    "chamfer_mm": 58.543533701785464,
+    "chamfer_pct_length": 1.318077265052133,
+    "depth_mae_mm": 136.7025523376465,
+    "style_acc": 0.2,
+    "param_err": 0.36374183733689414,
+    "sec_per_car": 4.6272
+  },
+  "oracle": {
+    "n": 25,
+    "exec_rate": 1.0,
+    "silhouette_iou": 0.9997351671832235,
+    "voxel_iou": 0.999404394360465,
+    "chamfer_mm": 0.1566314745980549,
+    "chamfer_pct_length": 0.0034592208274724493,
+    "depth_mae_mm": 0.41034782528877256,
+    "style_acc": 1.0,
+    "param_err": 0.0,
+    "sec_per_car": 4.434000000000001
+  },
+  "search": {
+    "n": 25,
+    "exec_rate": 1.0,
+    "silhouette_iou": 0.9676618744995907,
+    "voxel_iou": 0.9079845898644028,
+    "chamfer_mm": 22.41102426410774,
+    "chamfer_pct_length": 0.4977512251729505,
+    "depth_mae_mm": 49.34479438781738,
+    "style_acc": 0.88,
+    "param_err": 0.24636643020423904,
+    "sec_per_car": 38.7108
+  },
+  "vlm_program": {
+    "n": 25,
+    "exec_rate": 1.0,
+    "silhouette_iou": 0.9220374264758218,
+    "voxel_iou": 0.7864330484918959,
+    "chamfer_mm": 56.26920013124244,
+    "chamfer_pct_length": 1.2551853283012226,
+    "depth_mae_mm": 145.96578704833985,
+    "style_acc": NaN,
+    "param_err": NaN,
+    "sec_per_car": 54.9432
+  }
+}

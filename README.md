@@ -1,0 +1,189 @@
+# 3D Gen Model: Photo → CAD with a Language World Model
+
+Given one photo of a car, recover an **editable CAD program**: the parts, the shape of each part, and the order of modelling operations that build it.
+
+The core idea of this project is a **language world model for CAD**. It is a model that reads a modelling state and the next CAD operation, and predicts the resulting state *before the kernel runs it*:
+
+$$
+\hat s_{t+1} = W_\phi(s_t, a_t), \qquad s_t = \text{summary of the solid after } t \text{ operations}
+$$
+
+A planner $\pi_\theta(a_t \mid \text{image}, s_{\le t})$ writes the program one operation at a time. The world model tells it what each step will do (which part grows or shrinks, by how much, and whether the step will fail), so the planner can check and revise its plan without executing every candidate in a CAD kernel.
+
+![program-writing loop](figures/program_round3.png)
+*The model writes a CAD program from the photo (left). The kernel executes it (middle). The overlay (right) shows agreement in green, missing material in red and extra material in blue.*
+
+## What is in this repository
+
+| component | file | role |
+|---|---|---|
+| Procedural car generator | `carworld/params.py`, `carworld/program.py` | 6 body styles, ~19 design parameters, 19–22 operation CAD programs with ground truth for every step |
+| Solid-modelling kernel | `carworld/sdf_kernel.py` | numpy signed-distance kernel: prisms, cylinders, intersections; union / cut / intersect; mirroring; per-surface materials; state summaries |
+| Renderer | `carworld/render.py` | sphere tracer producing photo-like images, masks and depth, with randomised camera, paint, lighting and background |
+| Metrics | `carworld/metrics.py` | silhouette IoU, depth error, voxel IoU, exact Chamfer distance via the SDF |
+| CAD export | `carworld/cq_kernel.py` | the same programs as CadQuery scripts → STEP / STL |
+| World-model benchmark | `scripts/build_wm_bench.py`, `scripts/run_world_model.py` | (state, operation) → next state, scored against the kernel |
+| Planners | `scripts/run_baseline.py` | from parameter search to a vision-language model that writes the whole CAD program |
+
+Coordinates: millimetres, +X front, +Y left, +Z up, ground at z = 0.
+
+## The state and action spaces
+
+**Action:** one JSON operation, for example:
+
+```json
+{"step": 4, "name": "arch_front", "part": "body", "mode": "cut", "mirror": true, "material": "arch",
+ "tool": {"type": "cylinder", "axis": "Y", "center": [1551.1, 362.9], "radius": 399.0, "extent": [533.4, 933.0]},
+ "comment": "Cut the front wheel arch"}
+```
+
+**State:** a compact, model-readable summary of the solid. For each part it records the volume in litres, the bounding box and its minimum corner in mm, the share of the surface covered by each material, and left–right symmetry. It also records a `valid` flag and the kernel's error, if any.
+
+The world model predicts the next state in this same format. Because the summary is text, any language model can act as a world model zero-shot, and it can also be fine-tuned on the generator's trajectories.
+
+## Results so far
+
+All numbers are on held-out test cars generated with their own seeds.
+
+### 1. World model: can a model predict what a CAD operation will do?
+
+The benchmark has 220 samples from 20 cars. Besides real build steps, it includes:
+- resized tools, so answers cannot be recalled from the template
+- cuts that miss the car
+- cuts that remove the whole body
+- edits of parts that don't exist yet
+- malformed tools
+
+| predictor | score | validity acc | failure F1 | change acc | bbox err (mm) |
+|---|---|---|---|---|---|
+| copy ("nothing happens", the floor) | 0.645* | 73% | 0.00 | 31% | 27 |
+| Muse Spark, zero-shot | **0.848** | 93% | 0.89 | 90% | 1 |
+| kernel (oracle) | 1.000 | 100% | 1.00 | 100% | 0 |
+
+\*Measured on the same 60 samples as the zero-shot model; it is 0.672 on all 220.
+
+A general model already predicts most failures and most bounding boxes. Volume changes are another matter:
+- They are accurate (≈1–2 % error) for cylinder operations such as wheels and arches.
+- They are poor for operations whose effect depends on the shape of a 2D outline.
+
+That gap is what training the world model on kernel trajectories is meant to close.
+
+### 2. Planner: photo → CAD
+
+These results use 25 test cars (generator v2.1).
+
+| planner | silhouette IoU | voxel IoU | Chamfer (mm) |
+|---|---|---|---|
+| mean car (ignores the image) | 0.871 | 0.794 | 59 |
+| render-and-compare parameter search | 0.968 | 0.908 | 22 |
+| **model writes the CAD program** (Muse Spark, 4 rounds of render feedback) | 0.922 | 0.786 | 56 |
+
+Every program the model wrote ran in the kernel (25/25 valid). An earlier parameter-revising loop reached 0.952 silhouette IoU (`results/`, `results_v2/`).
+
+**Key finding:** feedback from the silhouette alone lets the planner match the outline, but not the 3D shape. Voxel IoU barely improves across rounds. This is the motivation for feedback through 3D state, from the kernel and, ultimately, from the learned world model.
+
+Full tables are in `results*/summary.md`. Per-car rows are in `results*/<predictor>.jsonl`.
+
+## Setup
+
+```bash
+git clone https://github.com/pramodthe/3d_gen_model.git && cd 3d_gen_model
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt          # numpy + pillow
+pip install cadquery                     # optional: OpenCascade kernel + STEP export (or: conda install -c conda-forge cadquery)
+```
+
+For language-model experiments, create a `.env` file (it is git-ignored, so never commit it):
+
+```
+META_API_KEY=...                 # from dev.meta.ai
+META_API_BASE=https://api.meta.ai/v1
+MODEL_API_MODEL=muse-spark-1.3
+REASONING_EFFORT=low             # low | medium | high
+```
+
+Any OpenAI-compatible server works through `--base-url`, `--model` and `--api-key-env`. That includes Fireworks AI and local LM Studio or Ollama servers.
+
+## Reproducing
+
+### Generate data
+
+```bash
+python scripts/generate_dataset.py --out data_v21 --split train --n 200 --views 3
+python scripts/generate_dataset.py --out data_v21 --split test  --n 25  --views 1
+```
+
+It takes about 1 s per car per core. Each car gets `params.json`, `program.json`, `program_cq.py`, `trajectory.jsonl` (state, action, next state, loss weight) and rendered views, masks and depth. The split root holds two training files:
+- `planner_sft.jsonl`: image → program
+- `world_model.jsonl`: (state, action) → next state
+
+**Loss weighting.** Each world-model turn carries an information weight:
+- 0.1 for near no-op turns
+- 0.5 for surface-only changes
+- 1.0 for real geometry changes and failures
+
+This keeps training focused on turns that say something about the kernel.
+
+### World-model benchmark
+
+```bash
+python scripts/build_wm_bench.py --cars 20 --normal-per-car 6 --out data_v21/wm_bench/bench.jsonl
+python scripts/run_world_model.py --bench data_v21/wm_bench/bench.jsonl --out results_wm21 --predictor oracle copy
+python scripts/run_world_model.py --bench data_v21/wm_bench/bench.jsonl --out results_wm21 --predictor llm --limit 60
+```
+
+Metrics:
+- validity accuracy and failure F1
+- change accuracy
+- error in the predicted volume change, relative to the true change
+- bounding-box error
+- Jaccard overlap of the materials present
+
+### Planners
+
+```bash
+python scripts/run_baseline.py --data data_v21/test --predictor oracle mean search --limit 25
+python scripts/run_baseline.py --data data_v21/test --predictor vlm_program --limit 25 --resume
+```
+
+| predictor | what it does |
+|---|---|
+| `oracle` | true parameters (sanity check) |
+| `mean` / `random` | the average car / a random car |
+| `search` | render-and-compare search over parameters (camera known) |
+| `vlm`, `vlm_cam` | a vision-language model estimates parameters from the photo (`vlm_cam` is also given the camera) |
+| `vlm_loop`, `vlm_loop2`, `vlm_loop3` | render-and-revise loops over parameters |
+| `vlm_program` | the model **writes the CAD program**. The kernel runs it, and the model sees kernel errors or its render plus an overlay, then rewrites. `--no-program-example` removes the example program from the prompt |
+
+### Fine-tuning data
+
+`scripts/export_fireworks.py` converts both training files to chat-format JSONL for LoRA fine-tuning.
+
+### Checking the CadQuery export
+
+```bash
+python scripts/verify_cadquery.py --data data_v21/test --limit 10 --export
+```
+
+This builds each `program_cq.py` with OpenCascade, checks that the volumes match the numpy kernel, and writes `car.step` and `car.stl`.
+
+### Real-shape calibration
+
+`scripts/partverse_find_cars.py` and `scripts/partverse_extract_cars.py` pull car meshes from the PartVerse dataset. The generator's v2 parameter ranges were widened to match the spread of 336 real car models.
+
+## Generator versions
+
+- **v1:** hand-set ranges and 5 styles. Used for `results/`.
+- **v2:** ranges calibrated against real car models, a `sports` style, plus bumpers, mirrors, exhaust and a rear wing. Used for `results_v2/` and `results_wm/`.
+- **v2.1** (current): fixes two geometry bugs.
+  - The glass insets pointed into the body.
+  - Low cars could have their tyres poke through the bonnet.
+
+  Used for `results_v21/` and `results_wm21/`. Every `params.json` records its `generator_version`.
+
+## Roadmap
+
+1. Close the loop with 3D state feedback: the planner sees kernel state summaries, not only renders.
+2. Fine-tune the world model on generator trajectories and use it in place of the kernel inside the planner's loop.
+3. Train the planner with reinforcement learning, with the world model as a cheap simulator.
+4. Move from renders to real photos, using segmentation to isolate the car.
