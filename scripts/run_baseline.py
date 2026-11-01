@@ -16,6 +16,8 @@ Predictors
     vlm_program          the model writes the CAD program; feedback = kernel errors or render + outline overlay
     vlm_program_3d       + 3D feedback about its OWN program: kernel state summary and front/side/top renders
     vlm_program_truth3d  + the TRUE car's state summary (upper bound for 3D feedback, not a method)
+    vlm_program_est3d    + the state ESTIMATED from the photo by the trained state estimator (the full pipeline)
+    est_params           no language model: the state estimator's predicted parameters, built with the template
 
 Usage:
     python scripts/run_baseline.py --data data/test --predictor mean search --limit 20
@@ -501,10 +503,32 @@ def predict_vlm_program_truth3d(sample, rng, args):
     return predict_vlm_program(sample, rng, args, state_feedback="truth", tag="program_truth3d")
 
 
+def _est_file(sample, kind: str) -> Path:
+    f = Path(sample["image_path"]).parent / f"est_{kind}_{sample['view']}.json"
+    if not f.exists():
+        raise FileNotFoundError(f"{f} not found: run scripts/modal_state_estimator.py (predict step) first")
+    return f
+
+
+def predict_est_params(sample, rng, args):
+    """No language model: the state estimator's predicted parameters and style, built with the template.
+    (A direct, single-shot competitor to render-and-compare search.)"""
+    d = json.loads(_est_file(sample, "params").read_text())
+    d.pop("style_probs", None)
+    return parse_params(json.dumps(d)), {}
+
+
+def predict_vlm_program_est3d(sample, rng, args):
+    """The full pipeline: as vlm_program_3d, plus the state ESTIMATED from the photo by the trained state estimator
+    (in the slot where the upper bound shows the true state). Nothing here uses the true car."""
+    return predict_vlm_program(sample, rng, args, state_feedback="est", tag="program_est3d")
+
+
 def predict_vlm_program(sample, rng, args, state_feedback: str = "none", tag: str = "program"):
     """The model WRITES the build program (components, shapes, positions). The kernel executes it; the model sees
     kernel errors or its rendered result next to the photo with a difference overlay, and rewrites the program.
-    state_feedback: "none" (silhouette only), "own" (+ its own 3D state and views), "truth" (+ the true state)."""
+    state_feedback: "none" (silhouette only), "own" (+ its own 3D state and views), "truth" (+ the true state),
+    "est" (+ the state estimated from the photo by the state estimator)."""
     cam, target = sample["camera"], sample["mask"]
     photo = {"type": "image_url", "image_url": {"url": _png_url(sample["image_path"])}}
     example = ("\nExample of a complete, valid program for a DIFFERENT car (a generic sedan), to show the format and "
@@ -569,6 +593,12 @@ def predict_vlm_program(sample, rng, args, state_feedback: str = "none", tag: st
                     fb += ("\n" + state_text(sample.setdefault("gt_state", program_state(sample["ops"])),
                                               "The TRUE car in the photo (same format):")
                            + "\nMake each part's sizes and positions match the true car.")
+                elif state_feedback == "est":
+                    fb += ("\n" + state_text(json.loads(_est_file(sample, "state").read_text()),
+                                              "ESTIMATED 3D state of the car in the photo, measured from the photo by a "
+                                              "separate vision model (it can be wrong):")
+                           + "\nMake each part's sizes and positions match this estimate, unless the photo clearly "
+                             "shows otherwise.")
                 else:
                     fb += ("\nCompare every number with what the photo shows and what a real car of this kind is "
                            "like (overall width, wheel track and tyre width, roof and glass height, the cross-section "
@@ -690,7 +720,8 @@ PREDICTORS = {"oracle": predict_oracle, "mean": predict_mean, "random": predict_
               "search": predict_search, "vlm": predict_vlm, "vlm_cam": predict_vlm_cam, "vlm_loop": predict_vlm_loop,
               "vlm_loop2": predict_vlm_loop2, "vlm_loop3": predict_vlm_loop3,
               "vlm_program": predict_vlm_program, "vlm_program_3d": predict_vlm_program_3d,
-              "vlm_program_truth3d": predict_vlm_program_truth3d}
+              "vlm_program_truth3d": predict_vlm_program_truth3d, "vlm_program_est3d": predict_vlm_program_est3d,
+              "est_params": predict_est_params}
 
 
 # ------------------------------------------------------------------ evaluation loop
@@ -698,7 +729,7 @@ def load_samples(data: Path, start: int, limit: int, view: int):
     ids = sorted(p.name for p in data.iterdir() if p.is_dir())[start:start + limit]
     for cid in ids:
         d = data / cid
-        yield {"id": cid, "params": cp.CarParams.from_dict(json.loads((d / "params.json").read_text())),
+        yield {"id": cid, "view": view, "params": cp.CarParams.from_dict(json.loads((d / "params.json").read_text())),
                "ops": json.loads((d / "program.json").read_text()),
                "camera": Camera(**json.loads((d / f"camera_{view}.json").read_text())),
                "look": Look(**json.loads((d / f"look_{view}.json").read_text())),
@@ -836,7 +867,7 @@ def summarize(out: Path) -> str:
             "style_acc": (float(np.mean([r["style_correct"] for r in ok if r.get("style_correct") is not None]))
                           if any(r.get("style_correct") is not None for r in ok) else float("nan")),
             "param_err": mean("param_err"), "sec_per_car": float(np.mean([r.get("seconds", np.nan) for r in rows]))}
-    order = ["oracle", "search", "vlm_program_truth3d", "vlm_program_3d", "vlm_program", "vlm_loop3", "vlm_loop2", "vlm_loop", "vlm_cam", "vlm", "mean", "random"]
+    order = ["oracle", "search", "est_params", "vlm_program_truth3d", "vlm_program_est3d", "vlm_program_3d", "vlm_program", "vlm_loop3", "vlm_loop2", "vlm_loop", "vlm_cam", "vlm", "mean", "random"]
     names = sorted(summary, key=lambda k: order.index(k) if k in order else 99)
     lines = ["| predictor | n | runs | silhouette IoU | voxel IoU | Chamfer (mm) | Chamfer (% length) | depth MAE (mm) "
              "| style acc | param err | s/car |", "|" + "---|" * 11]

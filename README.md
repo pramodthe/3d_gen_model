@@ -76,6 +76,7 @@ These results use 25 test cars (generator v2.1).
 |---|---|---|---|
 | mean car (ignores the image) | 0.871 | 0.794 | 59 |
 | render-and-compare parameter search | 0.968 | 0.908 | 22 |
+| **learned state estimator → template** (one forward pass, no language model) | **0.984** | **0.964** | **9** |
 | **model writes the CAD program** (Muse Spark, 4 rounds of render feedback) | 0.922 | 0.786 | 56 |
 | model writes the CAD program, no example program in the prompt | 0.899 | 0.707 | 71 |
 
@@ -99,6 +100,16 @@ This uses the same 25 cars, no example program, and Muse Spark 1.3 (contributor 
 **Key finding:** the bottleneck is perceiving the target's 3D state from the photo, not editing the program. A world model predicts the consequences of the planner's own actions; it cannot add information about the target. The next component is a **state estimator**: photo → the target's per-part sizes and positions. It can be trained on generated cars, where the true state is free, and it plugs into the slot the upper bound used.
 
 Full tables are in `results*/summary.md`. Per-car rows are in `results*/<predictor>.jsonl`.
+
+### 4. A learned state estimator
+
+`scripts/modal_state_estimator.py` trains on a cloud GPU (Modal): 10,000 new generated cars × 2 views, with ResNet-34 + the camera → the car's state summary, its 19 parameters and its body style. Training took about 20 minutes. On the 25 test photos:
+- part sizes are within about 2–3 cm (body length 31 mm, width 24 mm, height 16 mm mean error)
+- body style is right for 25 of 25 cars
+
+Built with the template, its parameters beat render-and-compare search on every metric, in one forward pass (table above, `est_params`).
+
+This is in-distribution: the estimator is trained on the same generator that made the test cars. The open question is whether the estimate also guides a planner that writes its own program (`vlm_program_est3d`), and whether it transfers to real photos.
 
 ## Setup
 
@@ -172,6 +183,8 @@ python scripts/run_baseline.py --data data_v21/test --predictor vlm_program --li
 | `vlm_program` | the model **writes the CAD program**. The kernel runs it, and the model sees kernel errors or its render plus an overlay, then rewrites. `--no-program-example` removes the example program from the prompt |
 | `vlm_program_3d` | as `vlm_program`, plus 3D feedback about its own car: the kernel's state summary and front/side/top renders |
 | `vlm_program_truth3d` | as `vlm_program_3d`, plus the true car's state summary (upper bound for 3D feedback) |
+| `vlm_program_est3d` | as `vlm_program_3d`, plus the state **estimated from the photo** by the trained estimator (the full pipeline) |
+| `est_params` | no language model: the estimator's predicted parameters, built with the template |
 
 ### Fine-tuning data
 
@@ -202,7 +215,7 @@ This builds each `program_cq.py` with OpenCascade, checks that the volumes match
 ## Roadmap
 
 1. ~~Close the loop with 3D state feedback.~~ Done (section 3 of the results): it only helps when the feedback carries information about the target.
-2. Train a state estimator: photo → the target's state summary, from generated cars.
+2. ~~Train a state estimator.~~ Done (section 4). Next: use it to guide the program writer, then test on real photos.
 3. Fine-tune the world model on generator trajectories and use it in place of the kernel inside the planner's loop.
 4. Train the planner with reinforcement learning, with the world model as a cheap simulator.
 5. Move from renders to real photos, using segmentation to isolate the car.

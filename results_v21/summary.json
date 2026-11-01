@@ -1,4 +1,16 @@
 {
+  "est_params": {
+    "n": 25,
+    "exec_rate": 1.0,
+    "silhouette_iou": 0.9838766924744284,
+    "voxel_iou": 0.963909648754759,
+    "chamfer_mm": 9.222975013284533,
+    "chamfer_pct_length": 0.2051482628629482,
+    "depth_mae_mm": 22.899341659545897,
+    "style_acc": 1.0,
+    "param_err": 0.11445989235705438,
+    "sec_per_car": 5.414799999999999
+  },
   "mean": {
     "n": 25,
     "exec_rate": 1.0,
