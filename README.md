@@ -77,8 +77,9 @@ These results use 25 test cars (generator v2.1).
 | mean car (ignores the image) | 0.871 | 0.794 | 59 |
 | render-and-compare parameter search | 0.968 | 0.908 | 22 |
 | **model writes the CAD program** (Muse Spark, 4 rounds of render feedback) | 0.922 | 0.786 | 56 |
+| model writes the CAD program, no example program in the prompt | 0.899 | 0.707 | 71 |
 
-Every program the model wrote ran in the kernel (25/25 valid). An earlier parameter-revising loop reached 0.952 silhouette IoU (`results/`, `results_v2/`).
+All 50 first drafts ran in the kernel. Removing the example program costs 0.02 silhouette IoU but 0.08 voxel IoU (`results_v21_noex/`). An earlier parameter-revising loop reached 0.952 silhouette IoU (`results/`, `results_v2/`).
 
 **Key finding:** feedback from the silhouette alone lets the planner match the outline, but not the 3D shape. Voxel IoU barely improves across rounds. This is the motivation for feedback through 3D state, from the kernel and, ultimately, from the learned world model.
 
@@ -179,7 +180,7 @@ This builds each `program_cq.py` with OpenCascade, checks that the volumes match
   - The glass insets pointed into the body.
   - Low cars could have their tyres poke through the bonnet.
 
-  Used for `results_v21/` and `results_wm21/`. Every `params.json` records its `generator_version`.
+  Used for `results_v21/`, `results_v21_noex/` and `results_wm21/`. Every `params.json` records its `generator_version`.
 
 ## Roadmap
 

@@ -1,0 +1,14 @@
+{
+  "vlm_program": {
+    "n": 25,
+    "exec_rate": 1.0,
+    "silhouette_iou": 0.8992852426688234,
+    "voxel_iou": 0.7071887155029463,
+    "chamfer_mm": 71.24231966974287,
+    "chamfer_pct_length": 1.5864718534603635,
+    "depth_mae_mm": 189.55146240234376,
+    "style_acc": NaN,
+    "param_err": NaN,
+    "sec_per_car": 65.98399999999998
+  }
+}
