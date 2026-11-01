@@ -92,7 +92,8 @@ This uses the same 25 cars, no example program, and Muse Spark 1.3 (contributor 
 |---|---|---|---|
 | outline only (control) | 0.912 | 0.545 → 0.723 | 66 |
 | + **its own car's 3D state** (kernel measurements, front/side/top renders) | 0.888 | 0.523 → 0.701 | 75 |
-| + **the true car's 3D state** (upper bound, not a method) | 0.928 | 0.533 → **0.789** | **49** |
+| + **the true car's 3D state** (upper bound, not a method) | 0.928 | 0.533 → 0.789 | 49 |
+| + **the 3D state estimated from the photo** (section 4, the full pipeline) | **0.931** | 0.532 → **0.801** | **46** |
 
 - **Its own 3D state does not help.** The change is −0.023 ± 0.021 voxel IoU, paired over 25 cars. It describes the model's own car and carries no new information about the target.
 - **The true 3D state helps at once.** The gain is +0.065 ± 0.018 voxel IoU, and the result is better on 20 of 25 cars. Chamfer falls 26 %, and most of the gain comes in the first revision. So the model *can* turn part sizes into correct program edits.
@@ -109,7 +110,14 @@ Full tables are in `results*/summary.md`. Per-car rows are in `results*/<predict
 
 Built with the template, its parameters beat render-and-compare search on every metric, in one forward pass (table above, `est_params`).
 
-This is in-distribution: the estimator is trained on the same generator that made the test cars. The open question is whether the estimate also guides a planner that writes its own program (`vlm_program_est3d`), and whether it transfers to real photos.
+**The estimate guides the program writer as well as the truth does.** With the estimated state in its feedback (`vlm_program_est3d`), Muse reaches voxel IoU 0.801 against 0.789 with the true state, a difference of +0.012 ± 0.012. Against the outline-only control it gains +0.077 ± 0.020 and is better on 21 of 25 cars. Chamfer distance falls 31 %. This is a complete photo → CAD-program pipeline in which nothing uses the true car.
+
+Caveats and what's next:
+- These results are in-distribution: the estimator is trained on the same generator that made the test cars.
+- The program writer is now the bottleneck: 0.801 voxel IoU, against 0.964 for the estimator's parameters built with the template.
+- Next: richer target states (cross-sections, occupancy), planner training with the world model, shapes outside the template, and real photos.
+
+Planner runs can execute on Modal, one container per car (`scripts/modal_planner.py`, about 10 min for 25 cars). Store the API key once with `modal secret create meta-api --from-dotenv .env`.
 
 ## Setup
 

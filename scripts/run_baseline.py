@@ -101,6 +101,9 @@ def predict_search(sample, rng, args):
     return best, {"renders": renders, "search_iou_lowres": round(best_s, 4)}
 
 
+NET_RETRIES, NET_BACKOFF = 4, 5.0      # up to 4 retries after 5, 15, 45, 135 s
+
+
 class PredictionError(ValueError):
     """A model reply we could not use; carries the reply so it can be inspected in results/<predictor>.jsonl."""
 
@@ -115,11 +118,22 @@ def _chat(args, messages, max_tokens, effort):
     req = urllib.request.Request(args.base_url.rstrip("/") + "/chat/completions", data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json",
                                           "Authorization": f"Bearer {os.environ.get(args.api_key_env, 'none')}"})
-    try:
-        with urllib.request.urlopen(req, timeout=args.timeout) as resp:
-            choice = json.loads(resp.read())["choices"][0]
-    except urllib.error.HTTPError as e:
-        raise PredictionError(f"HTTP {e.code}", {"http_body": e.read()[:500].decode(errors="replace")})
+    for attempt in range(NET_RETRIES + 1):   # network drops, rate limits and server errors are retried with backoff
+        try:
+            with urllib.request.urlopen(req, timeout=args.timeout) as resp:
+                choice = json.loads(resp.read())["choices"][0]
+            break
+        except urllib.error.HTTPError as e:
+            if e.code in (408, 409, 429) or e.code >= 500:
+                if attempt < NET_RETRIES:
+                    time.sleep(NET_BACKOFF * 3 ** attempt)
+                    continue
+            raise PredictionError(f"HTTP {e.code}", {"http_body": e.read()[:500].decode(errors="replace")})
+        except (urllib.error.URLError, OSError, TimeoutError):
+            if attempt < NET_RETRIES:
+                time.sleep(NET_BACKOFF * 3 ** attempt)
+                continue
+            raise
     msg = choice.get("message") or {}
     return msg.get("content") or "", choice.get("finish_reason")
 
@@ -762,9 +776,72 @@ def evaluate(pred_params, sample):
     return ops, m
 
 
+def run_one(name: str, s: dict, rng, a, out: Path) -> dict:
+    """Run one predictor on one test car and score it; returns the result row (also saves the comparison image)."""
+    fn = PREDICTORS[name]
+    row = {"id": s["id"], "gt_style": s["params"].style}
+    t0 = time.time()
+    try:
+        pred, info = fn(s, rng, a)
+        if isinstance(pred, dict) and "ops" in pred:      # the model wrote the program itself
+            prog = json.loads(json.dumps(pred["ops"]))     # clean copy to save; the kernel gets its own
+            ops, m = evaluate_ops(json.loads(json.dumps(prog)), s)
+            row.update(m, executed=True, pred_style=None, info=info, pred_program=prog)
+        else:
+            ops, m = evaluate(pred, s)
+            row.update(m, executed=True, pred_style=pred.style, info=info, pred_params=pred.to_dict())
+        if name != "oracle":
+            (out / "compare").mkdir(parents=True, exist_ok=True)
+            pr = render(sk.Model(ops), s["camera"], s["look"])
+            Image.fromarray(np.concatenate([s["image"], pr["rgb"]], 1)).save(out / "compare" / f"{s['id']}_{name}.png")
+    except Exception as e:  # a prediction that cannot be parsed or built counts as a failure
+        row.update(executed=False, error=f"{type(e).__name__}: {e}", info=getattr(e, "info", {}))
+    row["seconds"] = round(time.time() - t0, 2)
+    return row
+
+
+def finalize_args(a):
+    if a.loop_rounds is None:
+        a.loop_rounds = (5 if "vlm_loop2" in a.predictor else 4 if ("vlm_loop3" in a.predictor or any(p.startswith("vlm_program") for p in a.predictor))
+                         else 3)
+    return a
+
+
 def main():
     # .env first, so its values can serve as defaults (META_API_BASE, MODEL_API_MODEL, META_API_KEY)
     load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+    a = finalize_args(build_parser().parse_args())
+    if any(p.startswith("vlm") for p in a.predictor) and not os.environ.get(a.api_key_env) and "localhost" not in a.base_url:
+        sys.exit(f"No API key: put {a.api_key_env}=... in the .env file (or export it in your shell).")
+    if a.summarize_only:
+        print(summarize(Path(a.out)))
+        return
+
+    out = Path(a.out)
+    (out / "compare").mkdir(parents=True, exist_ok=True)
+    samples = list(load_samples(Path(a.data), a.start, a.limit, a.view))
+    print(f"{len(samples)} test cars from {a.data}")
+    for name in a.predictor:
+        rng = np.random.default_rng(a.seed + a.start)
+        res_file = out / f"{name}.jsonl"
+        if not (a.append or a.resume) and res_file.exists():
+            res_file.unlink()
+        done = set()
+        if a.resume and res_file.exists():
+            done = {r["id"] for r in map(json.loads, open(res_file)) if r.get("executed")}
+            print(f"  [{name}] resuming: {len(done)} cars already done, re-running the rest")
+        for s in samples:
+            if s["id"] in done:
+                continue
+            row = run_one(name, s, rng, a, out)
+            with open(res_file, "a") as f:  # written per car, so long runs can be split and merged
+                f.write(json.dumps(row, default=float) + "\n")
+            print(f"  [{name}] {s['id']}  " + (f"IoU {row['silhouette_iou']:.3f}  chamfer {row['chamfer_mm']:.0f} mm"
+                                               if row.get("executed") else row.get("error", "")), flush=True)
+    print("\n" + summarize(out))
+
+
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default="data/test")
     ap.add_argument("--predictor", nargs="+", default=["oracle", "mean", "random", "search"])
@@ -798,55 +875,7 @@ def main():
     ap.add_argument("--resume", action="store_true", help="keep finished cars in results/, redo missing and failed ones")
     ap.add_argument("--api-key-env", default="META_API_KEY" if os.environ.get("META_API_KEY") else "OPENAI_API_KEY",
                     help="name of the environment variable holding the API key (e.g. FIREWORKS_API_KEY)")
-    a = ap.parse_args()
-    if any(p.startswith("vlm") for p in a.predictor) and not os.environ.get(a.api_key_env) and "localhost" not in a.base_url:
-        sys.exit(f"No API key: put {a.api_key_env}=... in the .env file (or export it in your shell).")
-    if a.loop_rounds is None:
-        a.loop_rounds = (5 if "vlm_loop2" in a.predictor else 4 if ("vlm_loop3" in a.predictor or any(p.startswith("vlm_program") for p in a.predictor))
-                         else 3)
-    if a.summarize_only:
-        print(summarize(Path(a.out)))
-        return
-
-    out = Path(a.out)
-    (out / "compare").mkdir(parents=True, exist_ok=True)
-    samples = list(load_samples(Path(a.data), a.start, a.limit, a.view))
-    print(f"{len(samples)} test cars from {a.data}")
-    for name in a.predictor:
-        fn = PREDICTORS[name]
-        rng = np.random.default_rng(a.seed + a.start)
-        res_file = out / f"{name}.jsonl"
-        if not (a.append or a.resume) and res_file.exists():
-            res_file.unlink()
-        done = set()
-        if a.resume and res_file.exists():
-            done = {r["id"] for r in map(json.loads, open(res_file)) if r.get("executed")}
-            print(f"  [{name}] resuming: {len(done)} cars already done, re-running the rest")
-        for s in samples:
-            if s["id"] in done:
-                continue
-            row = {"id": s["id"], "gt_style": s["params"].style}
-            t0 = time.time()
-            try:
-                pred, info = fn(s, rng, a)
-                if isinstance(pred, dict) and "ops" in pred:      # the model wrote the program itself
-                    prog = json.loads(json.dumps(pred["ops"]))     # clean copy to save; the kernel gets its own
-                    ops, m = evaluate_ops(json.loads(json.dumps(prog)), s)
-                    row.update(m, executed=True, pred_style=None, info=info, pred_program=prog)
-                else:
-                    ops, m = evaluate(pred, s)
-                    row.update(m, executed=True, pred_style=pred.style, info=info, pred_params=pred.to_dict())
-                if name != "oracle":
-                    pr = render(sk.Model(ops), s["camera"], s["look"])
-                    Image.fromarray(np.concatenate([s["image"], pr["rgb"]], 1)).save(out / "compare" / f"{s['id']}_{name}.png")
-            except Exception as e:  # a prediction that cannot be parsed or built counts as a failure
-                row.update(executed=False, error=f"{type(e).__name__}: {e}", info=getattr(e, "info", {}))
-            row["seconds"] = round(time.time() - t0, 2)
-            with open(res_file, "a") as f:  # written per car, so long runs can be split and merged
-                f.write(json.dumps(row, default=float) + "\n")
-            print(f"  [{name}] {s['id']}  " + (f"IoU {row['silhouette_iou']:.3f}  chamfer {row['chamfer_mm']:.0f} mm"
-                                               if row.get("executed") else row.get("error", "")), flush=True)
-    print("\n" + summarize(out))
+    return ap
 
 
 def summarize(out: Path) -> str:

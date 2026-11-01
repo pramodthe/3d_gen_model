@@ -43,7 +43,8 @@ image = (modal.Image.debian_slim(python_version="3.12")
          .add_local_dir(ROOT / "carworld", remote_path="/root/carworld"))
 
 
-@app.function(image=image, cpu=1.0, memory=3072, timeout=3600, volumes={VOL_PATH: volume}, retries=1)
+# max_containers stays under the Starter plan's 100-container workspace limit (extra chunks simply wait their turn)
+@app.function(image=image, cpu=1.0, memory=3072, timeout=3600, volumes={VOL_PATH: volume}, retries=1, max_containers=80)
 def gen_chunk(tag: str, split: str, start: int, n: int, views: int) -> str:
     import numpy as np
     from carworld import state_target as stt

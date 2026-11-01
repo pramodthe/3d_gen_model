@@ -23,6 +23,18 @@
     "param_err": NaN,
     "sec_per_car": 165.36880000000002
   },
+  "vlm_program_est3d": {
+    "n": 25,
+    "exec_rate": 1.0,
+    "silhouette_iou": 0.9311976557601667,
+    "voxel_iou": 0.8007748195902343,
+    "chamfer_mm": 45.564846216721335,
+    "chamfer_pct_length": 1.009231988908939,
+    "depth_mae_mm": 131.73995315551758,
+    "style_acc": NaN,
+    "param_err": NaN,
+    "sec_per_car": 170.6668
+  },
   "vlm_program_truth3d": {
     "n": 25,
     "exec_rate": 1.0,
